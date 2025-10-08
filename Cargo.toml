@@ -1,18 +1,18 @@
 [package]
 name = "bevy-marching-cubes"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-bevy = { version = "0.16.0", default-features = false, features = [
+bevy = { version = "0.17", default-features = false, features = [
 	"bevy_render",
 ] }
-bevy_app_compute = "0.16.0"
+bevy_app_compute = { git = "https://github.com/jwright159/bevy_app_compute.git" }
 bytemuck = "1.23.1"
 
 [dev-dependencies]
-bevy = "0.16.0"
-bevy_panorbit_camera = "0.27.0"
+bevy = "0.17"
+bevy_panorbit_camera = "0.29"
 
 [lib]
 name = "bevy_marching_cubes"

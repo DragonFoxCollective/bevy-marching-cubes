@@ -265,10 +265,10 @@ impl<
 
         if !vertices.is_empty() && !triangles.is_empty() {
             let mesh = Mesh::new(
-                bevy::render::mesh::PrimitiveTopology::TriangleList,
-                bevy::render::render_asset::RenderAssetUsages::RENDER_WORLD,
+                bevy::mesh::PrimitiveTopology::TriangleList,
+                bevy::asset::RenderAssetUsages::RENDER_WORLD,
             )
-            .with_inserted_indices(bevy::render::mesh::Indices::U32(
+            .with_inserted_indices(bevy::mesh::Indices::U32(
                 triangles
                     .iter()
                     .flat_map(|t| [t.vertex_c, t.vertex_b, t.vertex_a])

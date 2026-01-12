@@ -2,6 +2,8 @@ use std::num::NonZero;
 
 use async_channel::{Receiver, Sender};
 use bevy::asset::{RenderAssetUsages, embedded_asset, load_embedded_asset};
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
@@ -13,9 +15,10 @@ use bevy::render::render_resource::binding_types::{
     storage_buffer, storage_buffer_read_only, storage_buffer_sized, uniform_buffer,
 };
 use bevy::render::render_resource::{
-    BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BufferUsages,
-    CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache,
-    ShaderStages, ShaderType, StorageBuffer, UniformBuffer,
+    BindGroup, BindGroupEntries, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntries,
+    BindGroupLayoutEntryBuilder, Buffer, BufferUsages, CachedComputePipelineId,
+    ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache, ShaderStages, ShaderType,
+    StorageBuffer, UniformBuffer,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::storage::{GpuShaderStorageBuffer, ShaderStorageBuffer};
@@ -56,7 +59,8 @@ impl<Sampler: ChunkComputeShader + Send + Sync + 'static, Material: Asset + bevy
                 start_chunks::<Sampler, Material>,
             )
                 .chain()
-                .in_set(ChunkGenSystems),
+                .in_set(ChunkGenSystems)
+                .run_if(resource_exists::<ChunkGeneratorCache<Sampler>>),
         );
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -70,7 +74,11 @@ impl<Sampler: ChunkComputeShader + Send + Sync + 'static, Material: Asset + bevy
                     .run_if(not(resource_exists::<
                         ChunkGeneratorComputePipelines<Sampler>,
                     >)),
-                prepare_bind_groups::<Sampler>.in_set(RenderSystems::PrepareBindGroups),
+                (
+                    Sampler::prepare_extra_buffers(),
+                    prepare_bind_groups::<Sampler>,
+                )
+                    .in_set(RenderSystems::PrepareBindGroups),
                 remove_nodes::<Sampler>.in_set(RenderSystems::Cleanup),
             ),
         );
@@ -218,14 +226,16 @@ fn init_compute_pipelines<Sampler: ChunkComputeShader + Send + Sync + 'static>(
 
     let sample_layout = render_device.create_bind_group_layout(
         "marching cubes sample bind group",
-        &BindGroupLayoutEntries::sequential(
-            ShaderStages::COMPUTE,
-            (
-                uniform_buffer::<IVec3>(false),
-                uniform_buffer::<MeshSettings>(false),
-                storage_buffer::<Vec<f32>>(false),
-            ),
-        ),
+        &[
+            uniform_buffer::<IVec3>(false),
+            uniform_buffer::<MeshSettings>(false),
+            storage_buffer::<Vec<f32>>(false),
+        ]
+        .into_iter()
+        .chain(Sampler::define_extra_buffers())
+        .enumerate()
+        .map(|(i, b)| b.build(i as u32, ShaderStages::COMPUTE))
+        .collect::<Vec<_>>(),
     );
     let sample_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("marching cubes sample compute shader".into()),
@@ -266,7 +276,14 @@ fn init_compute_pipelines<Sampler: ChunkComputeShader + Send + Sync + 'static>(
 }
 
 pub trait ChunkComputeShader {
-    fn shader_path() -> String; // TODO: this is just left over from bevy_app_compute. what's the bevy way to pass in an asset? probably a resource, same as settings
+    // TODO: this is just left over from bevy_app_compute. what's the bevy way to pass in an asset? probably a resource, same as settings
+    fn shader_path() -> String;
+    fn prepare_extra_buffers() -> ScheduleConfigs<ScheduleSystem> {
+        IntoSystem::into_system(|| {}).into_configs()
+    }
+    fn define_extra_buffers() -> Vec<BindGroupLayoutEntryBuilder> {
+        vec![]
+    }
 }
 
 #[derive(Component, Debug)]
@@ -283,7 +300,7 @@ struct ChunkGenData {
 }
 
 #[derive(Component, ExtractComponent, Debug)]
-struct ChunkRenderData<Sampler: Send + Sync + 'static> {
+pub struct ChunkRenderData<Sampler: Send + Sync + 'static> {
     position: IVec3,
     node_id: usize,
     tx: Sender<ChunkGeneratorRun>,
@@ -746,11 +763,16 @@ fn check_run_done<Sampler: ChunkComputeShader + Send + Sync + 'static>(
     }
 }
 
+#[derive(Component)]
+pub struct ChunkRenderExtraBuffers {
+    pub buffers: Vec<Buffer>,
+}
+
 fn prepare_bind_groups<Sampler: ChunkComputeShader + Send + Sync + 'static>(
     render_device: Res<RenderDevice>,
     mut render_graph: ResMut<RenderGraph>,
     render_queue: Res<RenderQueue>,
-    chunks: Query<&ChunkRenderData<Sampler>>,
+    chunks: Query<(&ChunkRenderData<Sampler>, Option<&ChunkRenderExtraBuffers>)>,
     buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
     settings: Res<ChunkGeneratorSettings<Sampler>>,
     pipelines: Res<ChunkGeneratorComputePipelines<Sampler>>,
@@ -762,7 +784,7 @@ fn prepare_bind_groups<Sampler: ChunkComputeShader + Send + Sync + 'static>(
     let sample_workgroups = (num_samples_per_axis as f32 / WORKGROUP_SIZE as f32).ceil() as u32;
     let march_workgroups = (num_voxels_per_axis as f32 / WORKGROUP_SIZE as f32).ceil() as u32;
 
-    for chunk in chunks.iter() {
+    for (chunk, extra_buffers) in chunks.iter() {
         info!("prepare_bind_groups {}", chunk.position);
 
         let mut chunk_position_buffer = UniformBuffer::from(chunk.position);
@@ -791,19 +813,33 @@ fn prepare_bind_groups<Sampler: ChunkComputeShader + Send + Sync + 'static>(
         let sample_bind_group = render_device.create_bind_group(
             Some("marching cubes sample bind group"),
             &pipelines.sample_layout,
-            &BindGroupEntries::sequential((
-                &chunk_position_buffer,
-                &settings_buffer,
-                &densities_buffer,
-            )),
+            &[
+                chunk_position_buffer.binding().unwrap(),
+                settings_buffer.binding().unwrap(),
+                densities_buffer.binding().unwrap(),
+            ]
+            .into_iter()
+            .chain(
+                extra_buffers
+                    .map(|b| &b.buffers)
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .map(|b| b.as_entire_binding()),
+            )
+            .enumerate()
+            .map(|(i, res)| BindGroupEntry {
+                binding: i as u32,
+                resource: res,
+            })
+            .collect::<Vec<_>>(),
         );
 
         let march_bind_group = render_device.create_bind_group(
             Some("marching cubes march bind group"),
             &pipelines.march_layout,
             &BindGroupEntries::sequential((
-                &densities_buffer,
-                &settings_buffer,
+                densities_buffer.binding().unwrap(),
+                settings_buffer.binding().unwrap(),
                 vertices_buffer.buffer.as_entire_binding(),
                 num_vertices_buffer.buffer.as_entire_binding(),
                 triangles_buffer.buffer.as_entire_binding(),

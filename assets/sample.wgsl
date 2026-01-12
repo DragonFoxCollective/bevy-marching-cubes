@@ -30,7 +30,7 @@ fn main(
 		return;
 	}
 
-	densities[density_index(coord)] = sample_noise(coord_to_world(coord) * 0.1);
+	densities[density_index(coord)] = sample_noise(coord_to_world(coord) * 0.05);
 }
 
 fn sample_noise(coord: vec3<f32>) -> f32 {

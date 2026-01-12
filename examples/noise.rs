@@ -1,9 +1,6 @@
 use bevy::color::palettes::{css, tailwind};
 use bevy::pbr::wireframe::{WireframeConfig, WireframePlugin};
 use bevy::prelude::*;
-use bevy_marching_cubes::chunk_generator::{
-    ChunkComputeShader, ChunkGeneratorSettings, ChunkLoader, ChunkMaterial, MarchingCubesPlugin,
-};
 use bevy_marching_cubes::*;
 
 fn main() {
@@ -20,17 +17,17 @@ fn main() {
         })
         .insert_resource(ChunkGeneratorSettings::<MyComputeSampler>::new(32, 8.0))
         .add_systems(Startup, setup)
+        .add_systems(Update, draw_gizmos)
         .run();
 }
 
 #[derive(TypePath)]
 struct MyComputeSampler;
-impl ComputeShader for MyComputeSampler {
-    fn shader() -> ShaderRef {
+impl ChunkComputeShader for MyComputeSampler {
+    fn shader_path() -> String {
         "sample.wgsl".into()
     }
 }
-impl ChunkComputeShader for MyComputeSampler {}
 
 fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
     commands.spawn((
@@ -63,4 +60,9 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     commands.insert_resource(ChunkMaterial::<MyComputeSampler, StandardMaterial>::new(
         materials.add(Color::from(tailwind::EMERALD_500)),
     ));
+}
+
+// debug gizmo to make sure it's running
+fn draw_gizmos(mut gizmos: Gizmos) {
+    gizmos.axes(Transform::default(), 1.0);
 }

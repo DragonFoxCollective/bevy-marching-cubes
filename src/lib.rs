@@ -78,6 +78,7 @@ impl<Sampler: ChunkComputeShader + Send + Sync + 'static, Material: Asset + bevy
                     Sampler::prepare_extra_buffers(),
                     prepare_bind_groups::<Sampler>,
                 )
+                    .chain()
                     .in_set(RenderSystems::PrepareBindGroups),
                 remove_nodes::<Sampler>.in_set(RenderSystems::Cleanup),
             ),
@@ -225,7 +226,7 @@ fn init_compute_pipelines<Sampler: ChunkComputeShader + Send + Sync + 'static>(
     info!("Init compute pipelines");
 
     let sample_layout = render_device.create_bind_group_layout(
-        "marching cubes sample bind group",
+        "marching cubes sample bind group layout",
         &[
             uniform_buffer::<IVec3>(false),
             uniform_buffer::<MeshSettings>(false),
@@ -245,7 +246,7 @@ fn init_compute_pipelines<Sampler: ChunkComputeShader + Send + Sync + 'static>(
     });
 
     let march_layout = render_device.create_bind_group_layout(
-        "marching cubes march bind group",
+        "marching cubes march bind group layout",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
@@ -461,6 +462,7 @@ impl<T: Send + Sync + 'static> ChunkGeneratorSettings<T> {
 pub struct ChunkGeneratorCache<T> {
     loaded_chunks: HashMap<IVec3, LoadState>,
     chunks_to_load: Vec<IVec3>,
+    current_chunk: Option<IVec3>,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -508,6 +510,7 @@ impl<T> Default for ChunkGeneratorCache<T> {
         Self {
             loaded_chunks: default(),
             chunks_to_load: default(),
+            current_chunk: default(),
             _marker: default(),
         }
     }
@@ -554,9 +557,9 @@ fn queue_chunks<Sampler: ChunkComputeShader + Send + Sync + 'static>(
         }
 
         load_order.sort_by(|a, b| {
-            // Sort ascending so that the closest chunks are loaded first
-            a.length_squared()
-                .partial_cmp(&b.length_squared())
+            // Sort descending so that the closest chunks are loaded first (popped, so backwards)
+            b.length_squared()
+                .partial_cmp(&a.length_squared())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
@@ -584,172 +587,172 @@ fn start_chunks<
     mut cache: ResMut<ChunkGeneratorCache<Sampler>>,
     material: Res<ChunkMaterial<Sampler, Material>>,
 ) {
-    for chunk_position in cache.chunks_to_load.drain(..) {
-        let max_num_vertices = settings.max_num_vertices();
-        let max_num_triangles = settings.max_num_triangles();
-        let vertices_buffer_size: u64 = settings.vertices_buffer_size().into();
-        let triangles_buffer_size: u64 = settings.triangles_buffer_size().into();
-
-        info!("start_chunks {chunk_position:?} {max_num_vertices} {max_num_triangles}");
-
-        let mut vertices_buffer = ShaderStorageBuffer::with_size(
-            vertices_buffer_size as usize,
-            RenderAssetUsages::default(),
-        );
-        vertices_buffer.buffer_description.usage |= BufferUsages::COPY_SRC;
-        let vertices_buffer = buffers.add(vertices_buffer);
-        let mut num_vertices_buffer = ShaderStorageBuffer::from(0u32);
-        num_vertices_buffer.buffer_description.usage |= BufferUsages::COPY_SRC;
-        let num_vertices_buffer = buffers.add(num_vertices_buffer);
-        let mut triangles_buffer = ShaderStorageBuffer::with_size(
-            triangles_buffer_size as usize,
-            RenderAssetUsages::default(),
-        );
-        triangles_buffer.buffer_description.usage |= BufferUsages::COPY_SRC;
-        let triangles_buffer = buffers.add(triangles_buffer);
-        let mut num_triangles_buffer = ShaderStorageBuffer::from(0u32);
-        num_triangles_buffer.buffer_description.usage |= BufferUsages::COPY_SRC;
-        let num_triangles_buffer = buffers.add(num_triangles_buffer);
-
-        let node_id = ids.next();
-        let (tx, rx) = async_channel::bounded(1);
-
-        let chunk_entity = commands
-            .spawn((
-                Name::new(format!("Chunk {chunk_position:?}")),
-                Transform::from_translation(settings.chunk_to_position(chunk_position)),
-                MeshMaterial3d(material.material.clone()),
-                Chunk::<Sampler> {
-                    position: chunk_position,
-                    _marker: default(),
-                },
-                ChunkGenData {
-                    rx,
-                    vertices: None,
-                    triangles: None,
-                },
-                ChunkRenderData::<Sampler> {
-                    position: chunk_position,
-                    node_id,
-                    tx,
-                    vertices_buffer: vertices_buffer.clone(),
-                    num_vertices_buffer: num_vertices_buffer.clone(),
-                    triangles_buffer: triangles_buffer.clone(),
-                    num_triangles_buffer: num_triangles_buffer.clone(),
-                    _marker: default(),
-                },
-            ))
-            .observe(finish_chunk::<Sampler>)
-            .id();
-
-        commands
-            .spawn((
-                Name::new(format!("Chunk {chunk_position:?} num_vertices readback")),
-                Readback::buffer(num_vertices_buffer),
-                ChildOf(chunk_entity),
-            ))
-            .observe(
-                move |readback: On<ReadbackComplete>,
-                      mut chunks: Query<(&mut ChunkGenData, Has<ChunkRenderData<Sampler>>)>,
-                      mut commands: Commands|
-                      -> Result {
-                    let (mut chunk, not_done) = chunks.get_mut(chunk_entity)?;
-                    if not_done {
-                        return Ok(());
-                    }
-                    let num_vertices: u32 = readback.to_shader_type();
-                    info!("num_vertices readback {chunk_position:?} {num_vertices}");
-                    commands.entity(readback.entity).despawn();
-                    if num_vertices > 0 {
-                        commands
-                            .spawn((
-                                Name::new(format!("Chunk {chunk_position:?} vertices readback")),
-                                Readback::buffer_range(
-                                    vertices_buffer.clone(),
-                                    0,
-                                    size_of::<Vertex>() as u64 * num_vertices as u64,
-                                ),
-                                ChildOf(chunk_entity),
-                            ))
-                            .observe(
-                                move |readback: On<ReadbackComplete>,
-                                      mut chunks: Query<&mut ChunkGenData>,
-                                      mut commands: Commands|
-                                      -> Result {
-                                    let vertices: Vec<Vertex> = readback.to_shader_type();
-                                    info!(
-                                        "vertices readback {chunk_position:?} {}",
-                                        vertices.len()
-                                    );
-                                    let mut chunk = chunks.get_mut(chunk_entity)?;
-                                    chunk.vertices = Some(vertices);
-                                    commands.trigger(ReadbackReallyComplete(chunk_entity));
-                                    commands.entity(readback.entity).despawn();
-                                    Ok(())
-                                },
-                            );
-                    } else {
-                        chunk.vertices = Some(vec![]);
-                        commands.trigger(ReadbackReallyComplete(chunk_entity));
-                    }
-                    Ok(())
-                },
-            );
-
-        commands
-            .spawn((
-                Name::new(format!("Chunk {chunk_position:?} num_triangles readback")),
-                Readback::buffer(num_triangles_buffer),
-                ChildOf(chunk_entity),
-            ))
-            .observe(
-                move |readback: On<ReadbackComplete>,
-                      mut chunks: Query<(&mut ChunkGenData, Has<ChunkRenderData<Sampler>>)>,
-                      mut commands: Commands|
-                      -> Result {
-                    let (mut chunk, not_done) = chunks.get_mut(chunk_entity)?;
-                    if not_done {
-                        return Ok(());
-                    }
-                    let num_triangles: u32 = readback.to_shader_type();
-                    info!("num_triangles readback {chunk_position:?} {num_triangles}");
-                    commands.entity(readback.entity).despawn();
-                    if num_triangles > 0 {
-                        commands
-                            .spawn((
-                                Name::new(format!("Chunk {chunk_position:?} triangles readback")),
-                                Readback::buffer_range(
-                                    triangles_buffer.clone(),
-                                    0,
-                                    size_of::<Triangle>() as u64 * num_triangles as u64,
-                                ),
-                                ChildOf(chunk_entity),
-                            ))
-                            .observe(
-                                move |readback: On<ReadbackComplete>,
-                                      mut chunks: Query<&mut ChunkGenData>,
-                                      mut commands: Commands|
-                                      -> Result {
-                                    let triangles: Vec<Triangle> = readback.to_shader_type();
-                                    info!(
-                                        "triangles readback {chunk_position:?} {}",
-                                        triangles.len()
-                                    );
-                                    let mut chunk = chunks.get_mut(chunk_entity)?;
-                                    chunk.triangles = Some(triangles);
-                                    commands.trigger(ReadbackReallyComplete(chunk_entity));
-                                    commands.entity(readback.entity).despawn();
-                                    Ok(())
-                                },
-                            );
-                    } else {
-                        chunk.triangles = Some(vec![]);
-                        commands.trigger(ReadbackReallyComplete(chunk_entity));
-                    }
-                    Ok(())
-                },
-            );
+    if cache.current_chunk.is_some() {
+        return;
     }
+
+    let Some(chunk_position) = cache.chunks_to_load.pop() else {
+        return;
+    };
+
+    cache.current_chunk = Some(chunk_position);
+
+    let max_num_vertices = settings.max_num_vertices();
+    let max_num_triangles = settings.max_num_triangles();
+    let vertices_buffer_size: u64 = settings.vertices_buffer_size().into();
+    let triangles_buffer_size: u64 = settings.triangles_buffer_size().into();
+
+    info!("start_chunks {chunk_position:?} {max_num_vertices} {max_num_triangles}");
+
+    let mut vertices_buffer =
+        ShaderStorageBuffer::with_size(vertices_buffer_size as usize, RenderAssetUsages::default());
+    vertices_buffer.buffer_description.usage |= BufferUsages::COPY_SRC;
+    let vertices_buffer = buffers.add(vertices_buffer);
+    let mut num_vertices_buffer = ShaderStorageBuffer::from(0u32);
+    num_vertices_buffer.buffer_description.usage |= BufferUsages::COPY_SRC;
+    let num_vertices_buffer = buffers.add(num_vertices_buffer);
+    let mut triangles_buffer = ShaderStorageBuffer::with_size(
+        triangles_buffer_size as usize,
+        RenderAssetUsages::default(),
+    );
+    triangles_buffer.buffer_description.usage |= BufferUsages::COPY_SRC;
+    let triangles_buffer = buffers.add(triangles_buffer);
+    let mut num_triangles_buffer = ShaderStorageBuffer::from(0u32);
+    num_triangles_buffer.buffer_description.usage |= BufferUsages::COPY_SRC;
+    let num_triangles_buffer = buffers.add(num_triangles_buffer);
+
+    let node_id = ids.next();
+    let (tx, rx) = async_channel::bounded(1);
+
+    let chunk_entity = commands
+        .spawn((
+            Name::new(format!("Chunk {chunk_position:?}")),
+            Transform::from_translation(settings.chunk_to_position(chunk_position)),
+            MeshMaterial3d(material.material.clone()),
+            Chunk::<Sampler> {
+                position: chunk_position,
+                _marker: default(),
+            },
+            ChunkGenData {
+                rx,
+                vertices: None,
+                triangles: None,
+            },
+            ChunkRenderData::<Sampler> {
+                position: chunk_position,
+                node_id,
+                tx,
+                vertices_buffer: vertices_buffer.clone(),
+                num_vertices_buffer: num_vertices_buffer.clone(),
+                triangles_buffer: triangles_buffer.clone(),
+                num_triangles_buffer: num_triangles_buffer.clone(),
+                _marker: default(),
+            },
+        ))
+        .observe(finish_chunk::<Sampler>)
+        .id();
+
+    commands
+        .spawn((
+            Name::new(format!("Chunk {chunk_position:?} num_vertices readback")),
+            Readback::buffer(num_vertices_buffer),
+            ChildOf(chunk_entity),
+        ))
+        .observe(
+            move |readback: On<ReadbackComplete>,
+                  mut chunks: Query<(&mut ChunkGenData, Has<ChunkRenderData<Sampler>>)>,
+                  mut commands: Commands|
+                  -> Result {
+                let (mut chunk, not_done) = chunks.get_mut(chunk_entity)?;
+                if not_done {
+                    return Ok(());
+                }
+                let num_vertices: u32 = readback.to_shader_type();
+                info!("num_vertices readback {chunk_position:?} {num_vertices}");
+                commands.entity(readback.entity).despawn();
+                if num_vertices > 0 {
+                    commands
+                        .spawn((
+                            Name::new(format!("Chunk {chunk_position:?} vertices readback")),
+                            Readback::buffer_range(
+                                vertices_buffer.clone(),
+                                0,
+                                size_of::<Vertex>() as u64 * num_vertices as u64,
+                            ),
+                            ChildOf(chunk_entity),
+                        ))
+                        .observe(
+                            move |readback: On<ReadbackComplete>,
+                                  mut chunks: Query<&mut ChunkGenData>,
+                                  mut commands: Commands|
+                                  -> Result {
+                                let vertices: Vec<Vertex> = readback.to_shader_type();
+                                info!("vertices readback {chunk_position:?} {}", vertices.len());
+                                let mut chunk = chunks.get_mut(chunk_entity)?;
+                                chunk.vertices = Some(vertices);
+                                commands.trigger(ReadbackReallyComplete(chunk_entity));
+                                commands.entity(readback.entity).despawn();
+                                Ok(())
+                            },
+                        );
+                } else {
+                    chunk.vertices = Some(vec![]);
+                    commands.trigger(ReadbackReallyComplete(chunk_entity));
+                }
+                Ok(())
+            },
+        );
+
+    commands
+        .spawn((
+            Name::new(format!("Chunk {chunk_position:?} num_triangles readback")),
+            Readback::buffer(num_triangles_buffer),
+            ChildOf(chunk_entity),
+        ))
+        .observe(
+            move |readback: On<ReadbackComplete>,
+                  mut chunks: Query<(&mut ChunkGenData, Has<ChunkRenderData<Sampler>>)>,
+                  mut commands: Commands|
+                  -> Result {
+                let (mut chunk, not_done) = chunks.get_mut(chunk_entity)?;
+                if not_done {
+                    return Ok(());
+                }
+                let num_triangles: u32 = readback.to_shader_type();
+                info!("num_triangles readback {chunk_position:?} {num_triangles}");
+                commands.entity(readback.entity).despawn();
+                if num_triangles > 0 {
+                    commands
+                        .spawn((
+                            Name::new(format!("Chunk {chunk_position:?} triangles readback")),
+                            Readback::buffer_range(
+                                triangles_buffer.clone(),
+                                0,
+                                size_of::<Triangle>() as u64 * num_triangles as u64,
+                            ),
+                            ChildOf(chunk_entity),
+                        ))
+                        .observe(
+                            move |readback: On<ReadbackComplete>,
+                                  mut chunks: Query<&mut ChunkGenData>,
+                                  mut commands: Commands|
+                                  -> Result {
+                                let triangles: Vec<Triangle> = readback.to_shader_type();
+                                info!("triangles readback {chunk_position:?} {}", triangles.len());
+                                let mut chunk = chunks.get_mut(chunk_entity)?;
+                                chunk.triangles = Some(triangles);
+                                commands.trigger(ReadbackReallyComplete(chunk_entity));
+                                commands.entity(readback.entity).despawn();
+                                Ok(())
+                            },
+                        );
+                } else {
+                    chunk.triangles = Some(vec![]);
+                    commands.trigger(ReadbackReallyComplete(chunk_entity));
+                }
+                Ok(())
+            },
+        );
 }
 
 fn check_run_done<Sampler: ChunkComputeShader + Send + Sync + 'static>(
@@ -785,7 +788,11 @@ fn prepare_bind_groups<Sampler: ChunkComputeShader + Send + Sync + 'static>(
     let march_workgroups = (num_voxels_per_axis as f32 / WORKGROUP_SIZE as f32).ceil() as u32;
 
     for (chunk, extra_buffers) in chunks.iter() {
-        info!("prepare_bind_groups {}", chunk.position);
+        info!(
+            "prepare_bind_groups {} with {:?} extra buffers",
+            chunk.position,
+            extra_buffers.map(|b| b.buffers.len())
+        );
 
         let mut chunk_position_buffer = UniformBuffer::from(chunk.position);
         chunk_position_buffer.write_buffer(&render_device, &render_queue);
@@ -921,6 +928,11 @@ fn finish_chunk<Sampler: ChunkComputeShader + Send + Sync + 'static>(
     cache
         .loaded_chunks
         .insert(chunk_position, LoadState::Finished);
+    if let Some(current_chunk) = cache.current_chunk
+        && current_chunk == chunk_position
+    {
+        cache.current_chunk = None;
+    }
 
     commands.entity(readback.0).remove::<ChunkGenData>();
 

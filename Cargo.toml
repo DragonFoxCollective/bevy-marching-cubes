@@ -1,5 +1,5 @@
 [package]
-name = "bevy-marching-cubes"
+name = "bevy_marching_cubes"
 version = "0.2.0"
 edition = "2021"
 
@@ -13,7 +13,3 @@ bytemuck = "1.23.1"
 [dev-dependencies]
 bevy = "0.17"
 bevy_panorbit_camera = "0.29"
-
-[lib]
-name = "bevy_marching_cubes"
-path = "src/lib.rs"

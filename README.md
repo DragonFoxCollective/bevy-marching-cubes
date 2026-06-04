@@ -1,3 +1,6 @@
+> [!WARNING]
+> This repo is archived because its source code is now being hosted on [our website](https://git.dragonfox.dev/DragonFoxCollective/bevy_cube_marcher)!
+
 # bevy_cube_marcher
 
 [![Crates.io](https://img.shields.io/crates/v/bevy_cube_marcher)](https://crates.io/crates/bevy_cube_marcher)
